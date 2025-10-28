@@ -47,6 +47,50 @@ MIN_BASE_LEN = 20        # минимальная длина видимой ча
 # Путь к файлу конфигурации
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".yt_gui_downloader_config.json")
 
+# Настройки доступных аудио-форматов для режима «только аудио»
+AUDIO_FORMAT_OPTIONS = {
+    "mp3": {
+        "label": "MP3",
+        "codec": "mp3",
+        "extension": "mp3",
+        "bitrate_values": ["128", "160", "192", "224", "256", "320"],
+    },
+    "m4a": {
+        "label": "M4A / AAC",
+        "codec": "m4a",
+        "extension": "m4a",
+        "bitrate_values": ["128", "192", "256", "320"],
+    },
+    "opus": {
+        "label": "Opus",
+        "codec": "opus",
+        "extension": "opus",
+        "bitrate_values": ["96", "128", "160", "192"],
+    },
+    "vorbis": {
+        "label": "Vorbis",
+        "codec": "vorbis",
+        "extension": "ogg",
+        "bitrate_values": ["128", "160", "192", "224"],
+    },
+    "wav": {
+        "label": "WAV (без сжатия)",
+        "codec": "wav",
+        "extension": "wav",
+        "bitrate_values": [],
+    },
+}
+
+DEFAULT_AUDIO_FORMAT = "mp3"
+DEFAULT_AUDIO_QUALITY = "192"
+
+LIGHT_BG = "#f5f7fb"
+LIGHT_PANEL_BG = "#ffffff"
+TEXT_COLOR = "#0d1b2a"
+MUTED_TEXT_COLOR = "#5a6b7d"
+ACCENT_COLOR = "#3a7bd5"
+ACCENT_COLOR_ACTIVE = "#4f8de3"
+
 # Попытка импорта yt_dlp
 try:
     import yt_dlp
@@ -136,17 +180,22 @@ class TkLogger:
 
 @dataclass
 class DownloadPreset:
-    # Добавлено: выбор языка аудиодорожки (ru/en)
+    # Добавлено: выбор языка аудиодорожки
     height: int
     vcodec_choice: str  # "Авто", "AV1 (av01)", "VP9 (vp9)", "H.264 (avc1)"
     acodec_choice: str  # "Авто", "Opus (opus)", "AAC (mp4a)", "Vorbis (vorbis)"
-    alang_choice: str  #  'orig' (оригинал), 'ru' или 'en'
+    alang_choice: str  #  'orig' (оригинал) или ISO-код языка
     container_choice: str  # "Авто", "mp4", "mkv", "webm"
     outdir: str
     outtmpl_user: str
     cookies: Optional[str] = None
-    audio_only_mp3: bool = False
-    mp3_kbps: int = 192
+    audio_only: bool = False
+    audio_format: str = "mp3"  # mp3 / m4a / opus / vorbis / wav
+    audio_quality: str = "192"
+    download_playlist: bool = False
+    subtitle_langs: Tuple[str, ...] = field(default_factory=tuple)
+    write_subtitles: bool = False
+    embed_subtitles: bool = False
 
 
 @dataclass
@@ -162,8 +211,9 @@ class DownloaderApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("YouTube Видео Загрузчик (yt-dlp)")
-        self.geometry("980x860")
-        self.minsize(980, 860)
+        self.geometry("1020x900")
+        self.minsize(1020, 900)
+        self.configure(bg=LIGHT_BG)
 
         # Состояние
         self.cancel_event = threading.Event()
@@ -180,6 +230,12 @@ class DownloaderApp(tk.Tk):
         # Для «подробного» лога
         self._last_raw_line_ts: float = 0.0
         self._last_raw_percent: float = -1.0
+
+        # Доступные языки (динамически обновляемые)
+        self.available_audio_languages: List[str] = ["orig", "ru", "en"]
+        self.available_subtitle_languages: List[str] = []
+        self.selected_subtitle_langs: List[str] = []
+        self._metadata_fetching = False
 
         # UI
         self._build_ui()
@@ -214,66 +270,74 @@ class DownloaderApp(tk.Tk):
     def _build_ui(self):
         pad = 10
 
-        main = ttk.Frame(self)
+        main = ttk.Frame(self, padding=pad)
         main.pack(fill="both", expand=True, padx=pad, pady=pad)
 
         # URL
-        url_frame = ttk.LabelFrame(main, text="Ссылка на видео (YouTube)")
+        url_frame = ttk.LabelFrame(main, text="Ссылка на видео (YouTube)", padding=pad)
         url_frame.pack(fill="x", expand=False, pady=(0, pad))
         self.url_var = tk.StringVar()
         url_entry = ttk.Entry(url_frame, textvariable=self.url_var)
-        url_entry.pack(side="left", fill="x", expand=True, padx=(pad, pad), pady=pad)
+        url_entry.pack(side="left", fill="x", expand=True, padx=(0, pad))
         url_entry.focus_set()
 
+        analyze_btn = ttk.Button(url_frame, text="Анализировать", style="Accent.TButton", command=self._on_fetch_metadata_clicked)
+        analyze_btn.pack(side="left", padx=(0, pad))
+
         paste_btn = ttk.Button(url_frame, text="Вставить", command=self._paste_from_clipboard)
-        paste_btn.pack(side="left", padx=(0, pad), pady=pad)
+        paste_btn.pack(side="left", padx=(0, pad))
 
         clear_btn = ttk.Button(url_frame, text="Очистить", command=lambda: self.url_var.set(""))
-        clear_btn.pack(side="left", padx=(0, pad), pady=pad)
+        clear_btn.pack(side="left", padx=(0, pad))
 
         # Настройки
-        settings = ttk.LabelFrame(main, text="Настройки")
+        settings = ttk.LabelFrame(main, text="Настройки", padding=pad)
         settings.pack(fill="x", expand=False, pady=(0, pad))
 
         # Качество
-        ttk.Label(settings, text="Качество:").grid(row=0, column=0, padx=(pad, 5), pady=(pad, 5), sticky="w")
+        ttk.Label(settings, text="Качество:").grid(row=0, column=0, padx=(0, 5), pady=(0, 5), sticky="w")
         self.quality_var = tk.StringVar(value="1080p")
         qualities = ["480p", "720p", "1080p", "1440p (2K)", "2160p (4K)", "4320p (8K)"]
         self.quality_cb = ttk.Combobox(settings, textvariable=self.quality_var, values=qualities, state="readonly", width=20)
-        self.quality_cb.grid(row=0, column=1, padx=(0, 15), pady=(pad, 5), sticky="w")
+        self.quality_cb.grid(row=0, column=1, padx=(0, 15), pady=(0, 5), sticky="w")
 
         # Видео кодек
-        ttk.Label(settings, text="Видео кодек:").grid(row=0, column=2, padx=(pad, 5), pady=(pad, 5), sticky="w")
+        ttk.Label(settings, text="Видео кодек:").grid(row=0, column=2, padx=(0, 5), pady=(0, 5), sticky="w")
         self.vcodec_var = tk.StringVar(value="Авто")
         vcodec_values = ["Авто", "AV1 (av01)", "VP9 (vp9)", "H.264 (avc1)"]
         self.vcodec_cb = ttk.Combobox(settings, textvariable=self.vcodec_var, values=vcodec_values, state="readonly", width=18)
-        self.vcodec_cb.grid(row=0, column=3, padx=(0, 15), pady=(pad, 5), sticky="w")
+        self.vcodec_cb.grid(row=0, column=3, padx=(0, 15), pady=(0, 5), sticky="w")
 
         # Аудио кодек
-        ttk.Label(settings, text="Аудио кодек:").grid(row=0, column=4, padx=(pad, 5), pady=(pad, 5), sticky="w")
+        ttk.Label(settings, text="Аудио кодек:").grid(row=0, column=4, padx=(0, 5), pady=(0, 5), sticky="w")
         self.acodec_var = tk.StringVar(value="Авто")
         acodec_values = ["Авто", "Opus (opus)", "AAC (mp4a)", "Vorbis (vorbis)"]
         self.acodec_cb = ttk.Combobox(settings, textvariable=self.acodec_var, values=acodec_values, state="readonly", width=18)
-        self.acodec_cb.grid(row=0, column=5, padx=(0, pad), pady=(pad, 5), sticky="w")
+        self.acodec_cb.grid(row=0, column=5, padx=(0, 15), pady=(0, 5), sticky="w")
+
         # Язык аудио
-        ttk.Label(settings, text="Язык аудио:").grid(row=0, column=6, padx=(pad, 5), pady=(pad, 5), sticky="w")
-        self.alang_var = tk.StringVar(value="ru")
-        alang_values = ["orig", "ru", "en"]
-        self.alang_cb = ttk.Combobox(settings, textvariable=self.alang_var, values=alang_values, state="readonly", width=6)
-        self.alang_cb.grid(row=0, column=7, padx=(0, pad), pady=(pad, 5), sticky="w")
+        ttk.Label(settings, text="Язык аудио:").grid(row=0, column=6, padx=(0, 5), pady=(0, 5), sticky="w")
+        self.alang_var = tk.StringVar(value="orig")
+        self.alang_cb = ttk.Combobox(settings, textvariable=self.alang_var, values=self.available_audio_languages, state="readonly", width=8)
+        self.alang_cb.grid(row=0, column=7, padx=(0, 15), pady=(0, 5), sticky="w")
+
+        self.playlist_var = tk.IntVar(value=0)
+        self.playlist_cb = ttk.Checkbutton(settings, text="Скачать плейлист целиком", variable=self.playlist_var,
+                                           command=self._save_settings_debounced)
+        self.playlist_cb.grid(row=0, column=8, padx=(0, 0), pady=(0, 5), sticky="w")
 
         # Итоговый контейнер
-        ttk.Label(settings, text="Контейнер:").grid(row=1, column=0, padx=(pad, 5), pady=5, sticky="w")
+        ttk.Label(settings, text="Контейнер:").grid(row=1, column=0, padx=(0, 5), pady=5, sticky="w")
         self.container_var = tk.StringVar(value="Авто")
         container_values = ["Авто", "mp4", "mkv", "webm"]
         self.container_cb = ttk.Combobox(settings, textvariable=self.container_var, values=container_values, state="readonly", width=20)
         self.container_cb.grid(row=1, column=1, padx=(0, 15), pady=5, sticky="w")
 
         # Папка сохранения
-        ttk.Label(settings, text="Папка сохранения:").grid(row=1, column=2, padx=(pad, 5), pady=5, sticky="w")
+        ttk.Label(settings, text="Папка сохранения:").grid(row=1, column=2, padx=(0, 5), pady=5, sticky="w")
         self.outdir_var = tk.StringVar(value=os.path.join(os.path.expanduser("~"), "Downloads"))
         outdir_entry = ttk.Entry(settings, textvariable=self.outdir_var, width=40)
-        outdir_entry.grid(row=1, column=3, padx=(0, 5), pady=5, sticky="w", columnspan=1)
+        outdir_entry.grid(row=1, column=3, padx=(0, 5), pady=5, sticky="w")
         outdir_btn = ttk.Button(settings, text="Выбрать...", command=self._choose_outdir)
         outdir_btn.grid(row=1, column=4, padx=(0, 15), pady=5, sticky="w")
 
@@ -281,38 +345,66 @@ class DownloaderApp(tk.Tk):
         ttk.Label(settings, text="Cookies (опционально):").grid(row=1, column=5, padx=(0, 5), pady=5, sticky="w")
         self.cookies_var = tk.StringVar()
         cookies_btn = ttk.Button(settings, text="Выбрать cookies.txt...", command=self._choose_cookies)
-        cookies_btn.grid(row=1, column=6, padx=(0, pad), pady=5, sticky="w")
+        cookies_btn.grid(row=1, column=6, columnspan=2, padx=(0, 15), pady=5, sticky="w")
 
         # Путь к cookies
-        ttk.Label(settings, text="Путь cookies:").grid(row=2, column=0, padx=(pad, 5), pady=5, sticky="w")
+        ttk.Label(settings, text="Путь cookies:").grid(row=2, column=0, padx=(0, 5), pady=5, sticky="w")
         self.cookies_path_entry = ttk.Entry(settings, textvariable=self.cookies_var, width=85)
-        self.cookies_path_entry.grid(row=2, column=1, columnspan=5, padx=(0, 5), pady=5, sticky="w")
+        self.cookies_path_entry.grid(row=2, column=1, columnspan=7, padx=(0, 5), pady=5, sticky="w")
 
         # Имя файла (шаблон)
-        ttk.Label(settings, text="Имя файла:").grid(row=3, column=0, padx=(pad, 5), pady=5, sticky="w")
+        ttk.Label(settings, text="Имя файла:").grid(row=3, column=0, padx=(0, 5), pady=5, sticky="w")
         self.outtmpl_var = tk.StringVar(value="%(title)s.%(ext)s")
         outtmpl_entry = ttk.Entry(settings, textvariable=self.outtmpl_var, width=85)
-        outtmpl_entry.grid(row=3, column=1, columnspan=5, padx=(0, 5), pady=5, sticky="w")
-        hint = ttk.Label(settings, text="Рекомендуем оставить %(title)s.%(ext)s — приложение ПЕРЕИМЕНУЕТ файл после загрузки в: <v>_<a>_<h>_<Title>.<ext>", foreground="#555")
-        hint.grid(row=4, column=1, columnspan=6, padx=(0, pad), pady=(0, pad), sticky="w")
+        outtmpl_entry.grid(row=3, column=1, columnspan=7, padx=(0, 5), pady=5, sticky="w")
+        hint = ttk.Label(settings, text="Рекомендуем оставить %(title)s.%(ext)s — приложение переименует итоговый файл автоматически.", foreground=MUTED_TEXT_COLOR)
+        hint.grid(row=4, column=1, columnspan=7, padx=(0, 5), pady=(0, 5), sticky="w")
 
-        # Только аудио (MP3)
+        # Только аудио
         self.audio_only_var = tk.IntVar(value=0)
-        audio_only_cb = ttk.Checkbutton(settings, text="Скачать только аудио (MP3)", variable=self.audio_only_var,
-                                        command=self._save_settings_debounced)
-        audio_only_cb.grid(row=5, column=1, sticky="w", padx=(0, 15), pady=(5, 5))
+        audio_only_cb = ttk.Checkbutton(settings, text="Скачать только аудио", variable=self.audio_only_var,
+                                        command=self._on_audio_only_toggle)
+        audio_only_cb.grid(row=5, column=0, columnspan=2, sticky="w", pady=(5, 5))
 
-        ttk.Label(settings, text="Битрейт MP3:").grid(row=5, column=2, padx=(0, 5), pady=(5, 5), sticky="e")
-        self.mp3_bitrate_var = tk.StringVar(value="192")
-        self.mp3_bitrate_cb = ttk.Combobox(settings, textvariable=self.mp3_bitrate_var, state="readonly",
-                                           values=["128","160","192","224","256","320"], width=6)
-        self.mp3_bitrate_cb.grid(row=5, column=3, sticky="w", padx=(0, 5), pady=(5, 5))
+        ttk.Label(settings, text="Формат:").grid(row=5, column=2, padx=(0, 5), pady=(5, 5), sticky="e")
+        self.audio_format_var = tk.StringVar(value=DEFAULT_AUDIO_FORMAT)
+        format_labels = [info['label'] for info in AUDIO_FORMAT_OPTIONS.values()]
+        self.audio_format_map = {info["label"]: key for key, info in AUDIO_FORMAT_OPTIONS.items()}
+        self.audio_format_label_var = tk.StringVar(value=AUDIO_FORMAT_OPTIONS[DEFAULT_AUDIO_FORMAT]["label"])
+        self.audio_format_cb = ttk.Combobox(settings, state="readonly", values=format_labels,
+                                           textvariable=self.audio_format_label_var)
+        self.audio_format_cb.grid(row=5, column=3, padx=(0, 5), pady=(5, 5), sticky="w")
+        self.audio_format_cb.bind("<<ComboboxSelected>>", lambda *_: self._on_audio_format_selected())
 
+        ttk.Label(settings, text="Битрейт:").grid(row=5, column=4, padx=(0, 5), pady=(5, 5), sticky="e")
+        self.audio_quality_var = tk.StringVar(value=DEFAULT_AUDIO_QUALITY)
+        self.audio_quality_cb = ttk.Combobox(settings, textvariable=self.audio_quality_var, state="readonly", width=8)
+        self.audio_quality_cb.grid(row=5, column=5, padx=(0, 15), pady=(5, 5), sticky="w")
+
+        # Субтитры
+        ttk.Label(settings, text="Субтитры:").grid(row=6, column=0, padx=(0, 5), pady=(5, 0), sticky="w")
+        self.write_subs_var = tk.IntVar(value=0)
+        write_cb = ttk.Checkbutton(settings, text="Скачать", variable=self.write_subs_var,
+                                   command=self._on_subtitle_option_changed)
+        write_cb.grid(row=6, column=1, sticky="w", pady=(5, 0))
+        self.embed_subs_var = tk.IntVar(value=0)
+        self.embed_subs_check = ttk.Checkbutton(settings, text="Встроить в видео", variable=self.embed_subs_var,
+                                               command=self._on_subtitle_option_changed)
+        self.embed_subs_check.grid(row=6, column=2, columnspan=2, sticky="w", pady=(5, 0))
+
+        self.subtitle_display_var = tk.StringVar(value="Не выбрано")
+        subtitle_entry = ttk.Entry(settings, textvariable=self.subtitle_display_var, state="readonly", width=40)
+        subtitle_entry.grid(row=6, column=4, columnspan=3, sticky="w", padx=(0, 5), pady=(5, 0))
+        self.subtitle_select_btn = ttk.Button(settings, text="Выбрать языки...", command=self._open_subtitle_selector)
+        self.subtitle_select_btn.grid(row=6, column=7, columnspan=2, sticky="w", pady=(5, 0))
+
+        for col in range(0, 9):
+            settings.grid_columnconfigure(col, weight=1 if col in (1, 3, 5, 7) else 0)
 
         # Кнопки управления
-        buttons = ttk.Frame(main)
+        buttons = ttk.Frame(main, padding=(0, 0, 0, 0))
         buttons.pack(fill="x", expand=False, pady=(0, pad))
-        self.download_btn = ttk.Button(buttons, text="Скачать сейчас", command=self._on_download_clicked)
+        self.download_btn = ttk.Button(buttons, text="Скачать сейчас", style="Accent.TButton", command=self._on_download_clicked)
         self.download_btn.pack(side="left", padx=(0, pad))
         self.cancel_btn = ttk.Button(buttons, text="Отмена", command=self._on_cancel_clicked, state="disabled")
         self.cancel_btn.pack(side="left", padx=(0, pad))
@@ -322,25 +414,25 @@ class DownloaderApp(tk.Tk):
         self.update_yt_btn.pack(side="left", padx=(0, pad))
 
         # Прогресс
-        progress_frame = ttk.LabelFrame(main, text="Прогресс")
+        progress_frame = ttk.LabelFrame(main, text="Прогресс", padding=pad)
         progress_frame.pack(fill="x", expand=False, pady=(0, pad))
         self.progress = ttk.Progressbar(progress_frame, mode="determinate", maximum=100)
-        self.progress.pack(fill="x", padx=pad, pady=(pad, 5))
+        self.progress.pack(fill="x", padx=0, pady=(0, 5))
         self.status_var = tk.StringVar(value="Ожидание...")
         status_label = ttk.Label(progress_frame, textvariable=self.status_var)
-        status_label.pack(fill="x", padx=pad, pady=(0, pad))
+        status_label.pack(fill="x", pady=(0, 0))
 
         # Очередь
-        queue_frame = ttk.LabelFrame(main, text="Очередь загрузок")
+        queue_frame = ttk.LabelFrame(main, text="Очередь загрузок", padding=pad)
         queue_frame.pack(fill="both", expand=True, pady=(0, pad))
 
         queue_buttons = ttk.Frame(queue_frame)
-        queue_buttons.pack(fill="x", expand=False, padx=pad, pady=(pad, 5))
+        queue_buttons.pack(fill="x", expand=False, pady=(0, pad))
         self.add_queue_btn = ttk.Button(queue_buttons, text="Добавить в очередь", command=self._on_add_to_queue)
         self.add_queue_btn.pack(side="left", padx=(0, 5))
         self.load_txt_btn = ttk.Button(queue_buttons, text="Загрузить .txt в очередь", command=self._on_load_txt_to_queue)
         self.load_txt_btn.pack(side="left", padx=(0, 5))
-        self.start_queue_btn = ttk.Button(queue_buttons, text="Старт очереди", command=self._on_start_queue)
+        self.start_queue_btn = ttk.Button(queue_buttons, text="Старт очереди", style="Accent.TButton", command=self._on_start_queue)
         self.start_queue_btn.pack(side="left", padx=(0, 5))
         self.clear_queue_btn = ttk.Button(queue_buttons, text="Очистить очередь", command=self._on_clear_queue)
         self.clear_queue_btn.pack(side="left", padx=(0, 5))
@@ -355,10 +447,10 @@ class DownloaderApp(tk.Tk):
             "container": "КОНТЕЙНЕР",
             "status": "СТАТУС",
         }
-        for col, w in zip(columns, (420, 100, 120, 120, 100, 120)):
+        for col, w in zip(columns, (420, 110, 120, 140, 120, 120)):
             self.queue_tv.heading(col, text=headers[col])
             self.queue_tv.column(col, width=w, anchor="w")
-        self.queue_tv.pack(fill="both", expand=True, padx=pad, pady=(0, pad))
+        self.queue_tv.pack(fill="both", expand=True)
 
         # Контекстное меню / события таблицы
         self._queue_menu = tk.Menu(self, tearoff=0)
@@ -372,29 +464,29 @@ class DownloaderApp(tk.Tk):
         self.queue_tv.configure(selectmode="extended")
 
         # --- ДВА ЛОГА: слева важный, справа подробный ---
-        logs_group = ttk.LabelFrame(main, text="Журналы")
+        logs_group = ttk.LabelFrame(main, text="Журналы", padding=pad)
         logs_group.pack(fill="both", expand=True)
 
         # горизонтальное расположение панелей (левая/правая)
         paned = ttk.Panedwindow(logs_group, orient="horizontal")
-        paned.pack(fill="both", expand=True, padx=pad, pady=pad)
+        paned.pack(fill="both", expand=True)
 
         # Важные сообщения (слева)
-        imp_frame = ttk.LabelFrame(paned, text="Важные сообщения")
-        self.log_main_text = tk.Text(imp_frame, wrap="word", height=10, state="disabled")
+        imp_frame = ttk.LabelFrame(paned, text="Важные сообщения", padding=pad)
+        self.log_main_text = tk.Text(imp_frame, wrap="word", height=10, state="disabled", bg=LIGHT_PANEL_BG, fg=TEXT_COLOR, insertbackground=ACCENT_COLOR)
         imp_vsb = ttk.Scrollbar(imp_frame, orient="vertical", command=self.log_main_text.yview)
         self.log_main_text.configure(yscrollcommand=imp_vsb.set)
-        self.log_main_text.pack(side="left", fill="both", expand=True, padx=(pad, 0), pady=(pad, pad))
-        imp_vsb.pack(side="right", fill="y", padx=(0, pad), pady=(pad, pad))
+        self.log_main_text.pack(side="left", fill="both", expand=True)
+        imp_vsb.pack(side="right", fill="y")
         paned.add(imp_frame, weight=1)
 
         # Подробный лог (справа)
-        raw_frame = ttk.LabelFrame(paned, text="Подробный лог (yt-dlp)")
-        self.log_raw_text = tk.Text(raw_frame, wrap="none", height=10, state="disabled")
+        raw_frame = ttk.LabelFrame(paned, text="Подробный лог (yt-dlp)", padding=pad)
+        self.log_raw_text = tk.Text(raw_frame, wrap="none", height=10, state="disabled", bg=LIGHT_PANEL_BG, fg=TEXT_COLOR, insertbackground=ACCENT_COLOR)
         raw_vsb = ttk.Scrollbar(raw_frame, orient="vertical", command=self.log_raw_text.yview)
         self.log_raw_text.configure(yscrollcommand=raw_vsb.set)
-        self.log_raw_text.pack(side="left", fill="both", expand=True, padx=(pad, 0), pady=(pad, pad))
-        raw_vsb.pack(side="right", fill="y", padx=(0, pad), pady=(pad, pad))
+        self.log_raw_text.pack(side="left", fill="both", expand=True)
+        raw_vsb.pack(side="right", fill="y")
         paned.add(raw_frame, weight=1)
 
         # Стили
@@ -405,21 +497,227 @@ class DownloaderApp(tk.Tk):
             else:
                 self.style.theme_use("clam")
         except Exception:
-            pass
+            self.style = ttk.Style(self)
+
+        self.style.configure("TFrame", background=LIGHT_BG)
+        self.style.configure("TLabelframe", background=LIGHT_BG, foreground=TEXT_COLOR)
+        self.style.configure("TLabelframe.Label", background=LIGHT_BG, foreground=TEXT_COLOR)
+        self.style.configure("TLabel", background=LIGHT_BG, foreground=TEXT_COLOR)
+        self.style.configure("TCheckbutton", background=LIGHT_BG, foreground=TEXT_COLOR)
+        self.style.configure("TEntry", fieldbackground=LIGHT_PANEL_BG, foreground=TEXT_COLOR)
+        self.style.configure("TCombobox", fieldbackground=LIGHT_PANEL_BG, foreground=TEXT_COLOR)
+        self.style.configure("TButton", background="#dbe8ff", foreground=TEXT_COLOR)
+        self.style.map("TButton", background=[("active", "#c9dcff")])
+        self.style.configure("Accent.TButton", background=ACCENT_COLOR, foreground="#ffffff")
+        self.style.map("Accent.TButton", background=[("active", ACCENT_COLOR_ACTIVE)])
+        self.style.configure("Treeview", background=LIGHT_PANEL_BG, fieldbackground=LIGHT_PANEL_BG, foreground=TEXT_COLOR, rowheight=24)
+        self.style.configure("Treeview.Heading", background=ACCENT_COLOR, foreground="#ffffff")
+        self.style.configure("TProgressbar", troughcolor="#dce4f5", background=ACCENT_COLOR)
 
         # Нижняя панель
-        footer = ttk.Frame(main)
-        footer.pack(fill="x", expand=False, pady=(pad, 0))
+        footer = ttk.Frame(main, padding=(0, pad, 0, 0))
+        footer.pack(fill="x", expand=False)
         note = ttk.Label(
             footer,
             text="Соблюдайте авторские права и условия YouTube. Загружайте только то, на что у вас есть права.",
-            foreground="#666"
+            foreground=MUTED_TEXT_COLOR
         )
-        note.pack(side="left", padx=(0, pad))
+        note.pack(side="left")
         # Версия yt-dlp
         self.ydl_version_var = tk.StringVar(value=f"yt-dlp {getattr(yt_dlp, '__version__', '?')}")
-        ver_lbl = ttk.Label(footer, textvariable=self.ydl_version_var, foreground="#666")
-        ver_lbl.pack(side="right", padx=(pad, 0))
+        ver_lbl = ttk.Label(footer, textvariable=self.ydl_version_var, foreground=MUTED_TEXT_COLOR)
+        ver_lbl.pack(side="right")
+
+        self._refresh_audio_quality_values()
+        self._on_audio_only_toggle(init=True)
+        self._update_subtitle_display()
+        self._on_subtitle_option_changed(init=True)
+
+    # ------------------------ Доп. помощники UI ------------------------
+
+    def _refresh_audio_quality_values(self):
+        if not hasattr(self, "audio_quality_cb"):
+            return
+        fmt_key = self.audio_format_var.get() or DEFAULT_AUDIO_FORMAT
+        fmt = AUDIO_FORMAT_OPTIONS.get(fmt_key, AUDIO_FORMAT_OPTIONS[DEFAULT_AUDIO_FORMAT])
+        values = fmt.get("bitrate_values", [])
+        if values:
+            self.audio_quality_cb.configure(values=values, state="readonly")
+            if self.audio_quality_var.get() not in values:
+                self.audio_quality_var.set(values[0])
+        else:
+            self.audio_quality_cb.configure(values=[], state="disabled")
+            self.audio_quality_var.set("0")
+
+    def _on_audio_format_selected(self):
+        label = self.audio_format_label_var.get()
+        fmt = self.audio_format_map.get(label, DEFAULT_AUDIO_FORMAT)
+        self.audio_format_var.set(fmt)
+        self._refresh_audio_quality_values()
+        self._save_settings_debounced()
+
+    def _on_audio_only_toggle(self, init: bool = False):
+        only_audio = bool(self.audio_only_var.get())
+        state_main = "disabled" if only_audio else "readonly"
+        for widget in [self.quality_cb, self.vcodec_cb, self.acodec_cb, self.container_cb]:
+            try:
+                widget.configure(state=state_main)
+            except Exception:
+                pass
+        audio_state = "readonly" if only_audio else "disabled"
+        try:
+            self.audio_format_cb.configure(state=audio_state)
+        except Exception:
+            pass
+        if only_audio:
+            self._refresh_audio_quality_values()
+        if self.audio_quality_cb:
+            try:
+                if audio_state == "disabled":
+                    self.audio_quality_cb.configure(state="disabled")
+                elif self.audio_quality_cb.cget("state") == "disabled":
+                    self.audio_quality_cb.configure(state="readonly")
+            except Exception:
+                pass
+        if not init:
+            self._save_settings_debounced()
+
+    def _on_subtitle_option_changed(self, init: bool = False):
+        if not self.write_subs_var.get():
+            self.embed_subs_var.set(0)
+        state = "normal" if self.write_subs_var.get() else "disabled"
+        if hasattr(self, 'embed_subs_check'):
+            self.embed_subs_check.configure(state=state)
+        if hasattr(self, 'subtitle_select_btn'):
+            self.subtitle_select_btn.configure(state=state)
+        if not init:
+            self._save_settings_debounced()
+
+    def _update_subtitle_display(self):
+        if not hasattr(self, "subtitle_display_var"):
+            return
+        if self.selected_subtitle_langs:
+            self.subtitle_display_var.set(", ".join(sorted(self.selected_subtitle_langs)))
+        else:
+            self.subtitle_display_var.set("Не выбрано")
+
+    def _open_subtitle_selector(self):
+        if not self.available_subtitle_languages:
+            messagebox.showinfo(
+                "Субтитры",
+                "Список доступных субтитров пока неизвестен. Нажмите «Анализировать» для получения метаданных.",
+            )
+            return
+
+        win = tk.Toplevel(self)
+        win.title("Выбор субтитров")
+        win.transient(self)
+        win.grab_set()
+        pad = 10
+
+        frame = ttk.Frame(win, padding=pad)
+        frame.pack(fill="both", expand=True)
+
+        ttk.Label(frame, text="Выберите языки субтитров (можно несколько):").pack(anchor="w", pady=(0, 5))
+
+        listbox = tk.Listbox(frame, selectmode="multiple", height=10)
+        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=listbox.yview)
+        listbox.configure(yscrollcommand=scrollbar.set)
+        listbox.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        for idx, lang in enumerate(sorted(self.available_subtitle_languages)):
+            listbox.insert("end", lang)
+            if lang in self.selected_subtitle_langs:
+                listbox.selection_set(idx)
+
+        btns = ttk.Frame(frame)
+        btns.pack(fill="x", expand=False, pady=(pad, 0))
+
+        def on_ok():
+            selections = [listbox.get(i) for i in listbox.curselection()]
+            self.selected_subtitle_langs = selections
+            self._update_subtitle_display()
+            self._save_settings_debounced()
+            win.destroy()
+
+        ttk.Button(btns, text="Отмена", command=win.destroy).pack(side="right")
+        ttk.Button(btns, text="Сохранить", style="Accent.TButton", command=on_ok).pack(side="right", padx=(0, 5))
+
+    def _flatten_info_entries(self, info: dict) -> List[dict]:
+        if not isinstance(info, dict):
+            return []
+        if info.get("_type") in ("playlist", "multi_video") and info.get("entries"):
+            entries = []
+            for entry in info.get("entries", []):
+                if isinstance(entry, dict):
+                    entries.append(entry)
+            return entries or [info]
+        return [info]
+
+    def _update_languages_from_info(self, info: dict):
+        entries = self._flatten_info_entries(info)
+        audio_langs = set()
+        subtitle_langs = set(self.available_subtitle_languages)
+
+        for entry in entries:
+            for fmt in entry.get("formats", []) or []:
+                lang = fmt.get("language") or fmt.get("language_preference") or fmt.get("language_code")
+                if lang:
+                    audio_langs.add(lang.lower())
+            subtitles = entry.get("subtitles") or {}
+            for lang_code in subtitles.keys():
+                if lang_code:
+                    subtitle_langs.add(lang_code)
+
+        if audio_langs:
+            others = sorted({l for l in audio_langs if l.lower() not in ("", "und", "none", "orig")})
+            normalized = ["orig"] + others
+            self.available_audio_languages = normalized
+            current = self.alang_var.get()
+            self.alang_cb.configure(values=normalized)
+            if current not in normalized:
+                self.alang_var.set("orig")
+
+        self.available_subtitle_languages = sorted(subtitle_langs)
+        self.selected_subtitle_langs = [lang for lang in self.selected_subtitle_langs if lang in self.available_subtitle_languages]
+        self._update_subtitle_display()
+
+        langs_preview = ", ".join(self.available_audio_languages[:6])
+        subs_preview = ", ".join(self.available_subtitle_languages[:6]) or "—"
+        self._append_log(f"Анализ завершён. Аудиодорожки: {langs_preview or '—'} | Субтитры: {subs_preview}")
+
+    def _on_fetch_metadata_clicked(self):
+        url = (self.url_var.get() or "").strip()
+        if not url:
+            messagebox.showwarning("Введите ссылку", "Пожалуйста, вставьте ссылку для анализа.")
+            return
+        if self._metadata_fetching:
+            return
+        self._metadata_fetching = True
+        self._append_log("Анализируем ссылку через yt-dlp...")
+        threading.Thread(target=self._fetch_metadata_worker, args=(url,), daemon=True).start()
+
+    def _fetch_metadata_worker(self, url: str):
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+        }
+        if not bool(self.playlist_var.get()):
+            opts["noplaylist"] = True
+        cookies = (self.cookies_var.get() or "").strip()
+        if cookies:
+            opts["cookiefile"] = cookies
+        try:
+            with YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+            self.after(0, lambda info=info: self._update_languages_from_info(info))
+        except Exception as e:
+            self._append_log(f"Не удалось получить метаданные: {e}")
+            self.after(0, lambda: messagebox.showerror("Анализ", f"Не удалось получить метаданные: {e}"))
+        finally:
+            self.after(0, lambda: setattr(self, "_metadata_fetching", False))
 
     # ------------------------ Помощники UI ------------------------
 
@@ -974,20 +1272,39 @@ class DownloaderApp(tk.Tk):
         vch = self._norm_vcodec_choice(vch_gui)
         ach = self._norm_acodec_choice(ach_gui)
         container_choice = self._norm_container_choice(c_gui)
-        # --- Режим: только аудио (MP3) ---
-        if getattr(preset, 'audio_only_mp3', False):
+        # --- Режим: только аудио ---
+        if getattr(preset, 'audio_only', False):
             fmt_candidates = []
             lang = (preset.alang_choice or '').lower()
-            if lang in ('ru','en'):
+            if lang and lang != 'orig':
                 fmt_candidates.append(f"bestaudio[language^={lang}]")
             fmt_candidates.append('bestaudio')
             fmt = '/'.join(fmt_candidates)
-            self._append_log(f"Режим: только аудио MP3 | Язык аудио: {preset.alang_choice} | Битрейт: {getattr(preset,'mp3_kbps',192)} kbps")
+
+            fmt_info = AUDIO_FORMAT_OPTIONS.get(preset.audio_format, AUDIO_FORMAT_OPTIONS[DEFAULT_AUDIO_FORMAT])
+            codec = fmt_info['codec']
+            extension = fmt_info.get('extension', codec)
+            bitrate_values = fmt_info.get('bitrate_values') or []
+            quality = preset.audio_quality or DEFAULT_AUDIO_QUALITY
+            quality_txt = f"{quality} kbps" if bitrate_values else "без сжатия"
+
+            self._append_log(
+                f"Режим: только аудио {fmt_info['label']} | Язык аудио: {preset.alang_choice} | "
+                f"Качество: {quality_txt}"
+            )
+
             outtmpl = self._build_outtmpl_simple(preset.outtmpl_user, preset.outdir)
             logger = TkLogger(self.log_main_text, self.log_raw_text)
+            postprocessors = [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': codec,
+            }]
+            if bitrate_values:
+                postprocessors[0]['preferredquality'] = str(quality)
+
             run_opts = {
                 'format': fmt,
-                'noplaylist': True,
+                'noplaylist': not getattr(preset, 'download_playlist', False),
                 'outtmpl': outtmpl,
                 'logger': logger,
                 'concurrent_fragment_downloads': 5,
@@ -998,11 +1315,7 @@ class DownloaderApp(tk.Tk):
                 'quiet': False,
                 'no_warnings': False,
                 'postprocessor_hooks': [self._postprocessor_hook],
-                'postprocessors': [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': str(getattr(preset,'mp3_kbps',192))
-                }]
+                'postprocessors': postprocessors,
             }
             if preset.cookies:
                 run_opts['cookiefile'] = preset.cookies
@@ -1019,10 +1332,16 @@ class DownloaderApp(tk.Tk):
                         pass
                     title_final = info.get('title') or self._current_title
                     video_id = info.get('id')
-                    a_short = 'mp3'
+                    a_short = codec
                     v_short = 'audio'
-                    self._extra_status_suffix = f"A:{a_short.upper()} → MP3"
-                    self._auto_rename_result(self.last_output_path, v_short, a_short, None, 'mp3', title_hint=title_final, video_id_hint=video_id)
+                    final_ext = extension
+                    self._extra_status_suffix = f"A:{a_short.upper()} → {final_ext.upper()}"
+                    is_playlist = info.get('_type') in ('playlist', 'multi_video') or bool(info.get('entries'))
+                    if not is_playlist:
+                        self._auto_rename_result(self.last_output_path, v_short, a_short, None, final_ext,
+                                                 title_hint=title_final, video_id_hint=video_id)
+                    else:
+                        self._append_log("Плейлист: используется шаблон имён yt-dlp для каждого трека.")
                 self.progress.after(0, lambda: self.progress.configure(value=100))
                 self._set_status('Готово ✅')
                 self._append_log('Загрузка аудио завершена.')
@@ -1068,7 +1387,7 @@ class DownloaderApp(tk.Tk):
 
         base_opts = {
             "format": fmt,
-            "noplaylist": True,
+            "noplaylist": not getattr(preset, 'download_playlist', False),
             "outtmpl": outtmpl,
             "logger": logger,
             "concurrent_fragment_downloads": 5,
@@ -1082,6 +1401,13 @@ class DownloaderApp(tk.Tk):
         }
         if preset.cookies:
             base_opts["cookiefile"] = preset.cookies
+
+        if getattr(preset, 'write_subtitles', False):
+            base_opts["writesubtitles"] = True
+            if getattr(preset, 'subtitle_langs', None):
+                base_opts["subtitleslangs"] = list(preset.subtitle_langs)
+        if getattr(preset, 'embed_subtitles', False) and getattr(preset, 'write_subtitles', False):
+            base_opts["embedsubtitles"] = True
 
         if container_choice != "auto":
             base_opts["merge_output_format"] = container_choice
@@ -1100,6 +1426,8 @@ class DownloaderApp(tk.Tk):
             vid = info_probe.get("id") or "?"
             self._current_title = title
             self._append_log(f"▶ Сейчас скачиваем: «{self._ellipsize(title, MAX_UI_TITLE)}» [{vid}] | канал: {ch} | длительность: {dur}")
+
+            self.after(0, lambda info=info_probe: self._update_languages_from_info(info))
 
             if queue_item and not queue_item.title:
                 queue_item.title = title
@@ -1159,15 +1487,19 @@ class DownloaderApp(tk.Tk):
 
                 title_final = info.get("title") or self._current_title
                 video_id = info.get("id")
-                self._auto_rename_result(
-                    self.last_output_path,
-                    v_short,
-                    a_short,
-                    height_final,
-                    final_ext,
-                    title_hint=title_final,
-                    video_id_hint=video_id,
-                )
+                is_playlist = info.get('_type') in ('playlist', 'multi_video') or bool(info.get('entries'))
+                if not is_playlist:
+                    self._auto_rename_result(
+                        self.last_output_path,
+                        v_short,
+                        a_short,
+                        height_final,
+                        final_ext,
+                        title_hint=title_final,
+                        video_id_hint=video_id,
+                    )
+                else:
+                    self._append_log("Плейлист: автоматическое переименование отключено, используется шаблон yt-dlp.")
 
             self.progress.after(0, lambda: self.progress.configure(value=100))
             self._set_status("Готово ✅")
@@ -1217,15 +1549,19 @@ class DownloaderApp(tk.Tk):
 
                 title_final = info2.get("title") or self._current_title
                 video_id = info2.get("id")
-                self._auto_rename_result(
-                    self.last_output_path,
-                    v_short,
-                    a_short,
-                    height_final,
-                    "mkv",
-                    title_hint=title_final,
-                    video_id_hint=video_id,
-                )
+                is_playlist = info2.get('_type') in ('playlist', 'multi_video') or bool(info2.get('entries'))
+                if not is_playlist:
+                    self._auto_rename_result(
+                        self.last_output_path,
+                        v_short,
+                        a_short,
+                        height_final,
+                        "mkv",
+                        title_hint=title_final,
+                        video_id_hint=video_id,
+                    )
+                else:
+                    self._append_log("Плейлист: автоматическое переименование отключено, используется шаблон yt-dlp.")
 
             self.progress.after(0, lambda: self.progress.configure(value=100))
             self._set_status("Готово ✅ (MKV)")
@@ -1259,7 +1595,7 @@ class DownloaderApp(tk.Tk):
                 opts = {
                     "quiet": True,
                     "no_warnings": True,
-                    "noplaylist": True,
+                    "noplaylist": not getattr(item.preset, 'download_playlist', False),
                 }
                 if item.preset.cookies:
                     opts["cookiefile"] = item.preset.cookies
@@ -1417,13 +1753,14 @@ class DownloaderApp(tk.Tk):
         a = self._norm_acodec_choice(item.preset.acodec_choice)
         c = self._norm_container_choice(item.preset.container_choice)
         title_display = self._ellipsize(item.title or "Получаю название…", MAX_QUEUE_TITLE)
-        if getattr(item.preset, 'audio_only_mp3', False):
+        if getattr(item.preset, 'audio_only', False):
+            fmt_info = AUDIO_FORMAT_OPTIONS.get(item.preset.audio_format, AUDIO_FORMAT_OPTIONS[DEFAULT_AUDIO_FORMAT])
             values = (
                 title_display,
-                'Аудио MP3',
+                f"Аудио {fmt_info['label']}",
                 '—',
-                'MP3',
-                'MP3',
+                fmt_info['codec'].upper(),
+                fmt_info.get('extension', fmt_info['codec']).upper(),
                 item.status,
             )
         else:
@@ -1530,10 +1867,18 @@ class DownloaderApp(tk.Tk):
         a = self._norm_acodec_choice(item.preset.acodec_choice)
         c = self._norm_container_choice(item.preset.container_choice)
         try:
-            self.queue_tv.set(iid, "quality", ('Аудио MP3' if getattr(item.preset,'audio_only_mp3',False) else f"{item.preset.height}p"))
-            self.queue_tv.set(iid, "vcodec", ('—' if getattr(item.preset,'audio_only_mp3',False) else (v.upper() if v != "auto" else "AUTO")))
-            self.queue_tv.set(iid, "acodec", ('MP3' if getattr(item.preset,'audio_only_mp3',False) else (a.upper() if a != "auto" else "AUTO")))
-            self.queue_tv.set(iid, "container", ('MP3' if getattr(item.preset,'audio_only_mp3',False) else (c.upper() if c != "auto" else "AUTO")))
+            if getattr(item.preset, 'audio_only', False):
+                fmt_info = AUDIO_FORMAT_OPTIONS.get(item.preset.audio_format, AUDIO_FORMAT_OPTIONS[DEFAULT_AUDIO_FORMAT])
+                quality = f"Аудио {fmt_info['label']}"
+                self.queue_tv.set(iid, "quality", quality)
+                self.queue_tv.set(iid, "vcodec", '—')
+                self.queue_tv.set(iid, "acodec", fmt_info['codec'].upper())
+                self.queue_tv.set(iid, "container", fmt_info.get('extension', fmt_info['codec']).upper())
+            else:
+                self.queue_tv.set(iid, "quality", f"{item.preset.height}p")
+                self.queue_tv.set(iid, "vcodec", (v.upper() if v != "auto" else "AUTO"))
+                self.queue_tv.set(iid, "acodec", (a.upper() if a != "auto" else "AUTO"))
+                self.queue_tv.set(iid, "container", (c.upper() if c != "auto" else "AUTO"))
             self._queue_set_title_cell(item)
         except Exception:
             pass
@@ -1559,65 +1904,131 @@ class DownloaderApp(tk.Tk):
         outdir_var = tk.StringVar(value=item.preset.outdir)
         outtmpl_var = tk.StringVar(value=item.preset.outtmpl_user)
         cookies_var = tk.StringVar(value=item.preset.cookies or "")
+        playlist_var = tk.IntVar(value=1 if getattr(item.preset, 'download_playlist', False) else 0)
+        audio_only_var = tk.IntVar(value=1 if getattr(item.preset, 'audio_only', False) else 0)
+        audio_format_key = getattr(item.preset, 'audio_format', DEFAULT_AUDIO_FORMAT)
+        audio_quality_value = getattr(item.preset, 'audio_quality', DEFAULT_AUDIO_QUALITY)
+        write_subs_var = tk.IntVar(value=1 if getattr(item.preset, 'write_subtitles', False) else 0)
+        embed_subs_var = tk.IntVar(value=1 if getattr(item.preset, 'embed_subtitles', False) else 0)
+        subtitle_var = tk.StringVar(value=",".join(getattr(item.preset, 'subtitle_langs', ()) or []))
 
         frm = ttk.Frame(win)
         frm.pack(fill="both", expand=True, padx=pad, pady=pad)
 
-        ttk.Label(frm, text="Качество:").grid(row=0, column=0, sticky="w", padx=(0,5), pady=(0,5))
+        ttk.Label(frm, text="Качество:").grid(row=0, column=0, sticky="w", padx=(0, 5), pady=(0, 5))
         q_cb = ttk.Combobox(frm, textvariable=q_var, state="readonly",
-                            values=["480p","720p","1080p","1440p (2K)","2160p (4K)","4320p (8K)"], width=18)
-        q_cb.grid(row=0, column=1, sticky="w", pady=(0,5))
+                            values=["480p", "720p", "1080p", "1440p (2K)", "2160p (4K)", "4320p (8K)"], width=18)
+        q_cb.grid(row=0, column=1, sticky="w", pady=(0, 5))
 
-        ttk.Label(frm, text="Видео кодек:").grid(row=0, column=2, sticky="w", padx=(15,5), pady=(0,5))
+        ttk.Label(frm, text="Видео кодек:").grid(row=0, column=2, sticky="w", padx=(15, 5), pady=(0, 5))
         v_cb = ttk.Combobox(frm, textvariable=v_var, state="readonly",
-                            values=["Авто","AV1 (av01)","VP9 (vp9)","H.264 (avc1)"], width=18)
-        v_cb.grid(row=0, column=3, sticky="w", pady=(0,5))
+                            values=["Авто", "AV1 (av01)", "VP9 (vp9)", "H.264 (avc1)"], width=18)
+        v_cb.grid(row=0, column=3, sticky="w", pady=(0, 5))
 
-        ttk.Label(frm, text="Аудио кодек:").grid(row=1, column=0, sticky="w", padx=(0,5), pady=5)
+        ttk.Label(frm, text="Аудио кодек:").grid(row=1, column=0, sticky="w", padx=(0, 5), pady=5)
         a_cb = ttk.Combobox(frm, textvariable=a_var, state="readonly",
-                            values=["Авто","Opus (opus)","AAC (mp4a)","Vorbis (vorbis)"], width=18)
+                            values=["Авто", "Opus (opus)", "AAC (mp4a)", "Vorbis (vorbis)"], width=18)
         a_cb.grid(row=1, column=1, sticky="w")
-        ttk.Label(frm, text="Язык аудио:").grid(row=1, column=2, sticky="w", padx=(15,5), pady=5)
-        alang_var = tk.StringVar(value=item.preset.alang_choice if hasattr(item.preset, "alang_choice") else "ru")
-        alang_cb = ttk.Combobox(frm, textvariable=alang_var, state="readonly", values=["orig","ru","en"], width=6)
+
+        available_alangs = sorted(set(self.available_audio_languages + [item.preset.alang_choice, "orig"]))
+        ttk.Label(frm, text="Язык аудио:").grid(row=1, column=2, sticky="w", padx=(15, 5), pady=5)
+        alang_var = tk.StringVar(value=item.preset.alang_choice if hasattr(item.preset, "alang_choice") else "orig")
+        alang_cb = ttk.Combobox(frm, textvariable=alang_var, state="readonly", values=available_alangs, width=10)
         alang_cb.grid(row=1, column=3, sticky="w")
 
-        # Только аудио (MP3)
-        audio_only_var = tk.IntVar(value=1 if getattr(item.preset,'audio_only_mp3',False) else 0)
-        audio_only_cb = ttk.Checkbutton(frm, text='Скачать только аудио (MP3)', variable=audio_only_var)
-        audio_only_cb.grid(row=2, column=0, columnspan=2, sticky='w', pady=5)
-
-        ttk.Label(frm, text='Битрейт MP3:').grid(row=2, column=2, sticky='e', padx=(15,5))
-        mp3_bitrate_var = tk.StringVar(value=str(getattr(item.preset,'mp3_kbps',192)))
-        mp3_bitrate_cb = ttk.Combobox(frm, textvariable=mp3_bitrate_var, state='readonly', values=['128','160','192','224','256','320'], width=6)
-        mp3_bitrate_cb.grid(row=2, column=3, sticky='w')
-
-
-        ttk.Label(frm, text="Контейнер:").grid(row=1, column=2, sticky="w", padx=(15,5), pady=5)
+        ttk.Label(frm, text="Контейнер:").grid(row=2, column=0, sticky="w", padx=(0, 5), pady=5)
         c_cb = ttk.Combobox(frm, textvariable=c_var, state="readonly",
-                            values=["Авто","mp4","mkv","webm"], width=18)
-        c_cb.grid(row=1, column=3, sticky="w")
+                            values=["Авто", "mp4", "mkv", "webm"], width=18)
+        c_cb.grid(row=2, column=1, sticky="w")
+        playlist_cb = ttk.Checkbutton(frm, text="Скачать плейлист целиком", variable=playlist_var)
+        playlist_cb.grid(row=2, column=2, columnspan=2, sticky="w")
 
-        ttk.Label(frm, text="Папка:").grid(row=2, column=0, sticky="w", padx=(0,5), pady=5)
-        outdir_e = ttk.Entry(frm, textvariable=outdir_var, width=52)
-        outdir_e.grid(row=2, column=1, columnspan=2, sticky="w")
+        audio_format_var = tk.StringVar(value=audio_format_key)
+        audio_format_label_var = tk.StringVar(value=AUDIO_FORMAT_OPTIONS.get(audio_format_key, AUDIO_FORMAT_OPTIONS[DEFAULT_AUDIO_FORMAT])["label"])
+        audio_quality_var = tk.StringVar(value=audio_quality_value)
+
+        audio_only_cb = ttk.Checkbutton(frm, text='Скачать только аудио', variable=audio_only_var)
+        audio_only_cb.grid(row=3, column=0, columnspan=2, sticky='w', pady=5)
+
+        ttk.Label(frm, text='Формат аудио:').grid(row=3, column=2, sticky='e', padx=(15, 5))
+        format_labels = [info['label'] for info in AUDIO_FORMAT_OPTIONS.values()]
+        format_map = {info['label']: key for key, info in AUDIO_FORMAT_OPTIONS.items()}
+        audio_format_cb = ttk.Combobox(frm, textvariable=audio_format_label_var, state='readonly', values=format_labels, width=20)
+        audio_format_cb.grid(row=3, column=3, sticky='w')
+
+        ttk.Label(frm, text='Битрейт:').grid(row=4, column=2, sticky='e', padx=(15, 5))
+        audio_quality_cb = ttk.Combobox(frm, textvariable=audio_quality_var, state='readonly', width=10)
+        audio_quality_cb.grid(row=4, column=3, sticky='w', pady=(0, 5))
+
+        ttk.Label(frm, text="Папка:").grid(row=5, column=0, sticky="w", padx=(0, 5), pady=5)
+        outdir_e = ttk.Entry(frm, textvariable=outdir_var, width=40)
+        outdir_e.grid(row=5, column=1, columnspan=2, sticky="we")
         ttk.Button(frm, text="Выбрать...", command=lambda: outdir_var.set(
             filedialog.askdirectory(initialdir=outdir_var.get()) or outdir_var.get())
-        ).grid(row=2, column=3, sticky="w")
+        ).grid(row=5, column=3, sticky="w")
 
-        ttk.Label(frm, text="Имя файла:").grid(row=3, column=0, sticky="w", padx=(0,5), pady=5)
-        outtmpl_e = ttk.Entry(frm, textvariable=outtmpl_var, width=52)
-        outtmpl_e.grid(row=3, column=1, columnspan=3, sticky="w")
+        ttk.Label(frm, text="Имя файла:").grid(row=6, column=0, sticky="w", padx=(0, 5), pady=5)
+        outtmpl_e = ttk.Entry(frm, textvariable=outtmpl_var, width=48)
+        outtmpl_e.grid(row=6, column=1, columnspan=3, sticky="we")
 
-        ttk.Label(frm, text="cookies.txt:").grid(row=4, column=0, sticky="w", padx=(0,5), pady=5)
-        cookies_e = ttk.Entry(frm, textvariable=cookies_var, width=52)
-        cookies_e.grid(row=4, column=1, columnspan=2, sticky="w")
+        ttk.Label(frm, text="cookies.txt:").grid(row=7, column=0, sticky="w", padx=(0, 5), pady=5)
+        cookies_e = ttk.Entry(frm, textvariable=cookies_var, width=40)
+        cookies_e.grid(row=7, column=1, columnspan=2, sticky="we")
         ttk.Button(frm, text="Выбрать...", command=lambda: cookies_var.set(
-            filedialog.askopenfilename(filetypes=[("Текстовые файлы","*.txt"), ("Все файлы","*.*")]) or cookies_var.get())
-        ).grid(row=4, column=3, sticky="w")
+            filedialog.askopenfilename(filetypes=[("Текстовые файлы", "*.txt"), ("Все файлы", "*.*")]) or cookies_var.get())
+        ).grid(row=7, column=3, sticky="w")
+
+        write_cb = ttk.Checkbutton(frm, text='Скачать субтитры', variable=write_subs_var)
+        write_cb.grid(row=8, column=0, sticky='w', pady=(5, 0))
+        embed_cb = ttk.Checkbutton(frm, text='Встроить в видео', variable=embed_subs_var)
+        embed_cb.grid(row=8, column=1, sticky='w', pady=(5, 0))
+        ttk.Label(frm, text='Языки (через запятую):').grid(row=8, column=2, sticky='e', padx=(15, 5))
+        subtitle_entry = ttk.Entry(frm, textvariable=subtitle_var, width=30)
+        subtitle_entry.grid(row=8, column=3, sticky='we', pady=(5, 0))
 
         btns = ttk.Frame(frm)
-        btns.grid(row=5, column=0, columnspan=4, sticky="e", pady=(10,0))
+        btns.grid(row=9, column=0, columnspan=4, sticky="e", pady=(10, 0))
+
+        def refresh_audio_quality():
+            fmt_key = audio_format_var.get()
+            opts = AUDIO_FORMAT_OPTIONS.get(fmt_key, AUDIO_FORMAT_OPTIONS[DEFAULT_AUDIO_FORMAT])
+            values = opts.get('bitrate_values') or []
+            if values:
+                audio_quality_cb.configure(values=values, state='readonly')
+                if audio_quality_var.get() not in values:
+                    audio_quality_var.set(values[0])
+            else:
+                audio_quality_cb.configure(values=[], state='disabled')
+                audio_quality_var.set('0')
+
+        def on_audio_format_change(*_):
+            fmt = format_map.get(audio_format_label_var.get(), DEFAULT_AUDIO_FORMAT)
+            audio_format_var.set(fmt)
+            refresh_audio_quality()
+
+        def apply_audio_only_state(*_):
+            only_audio = bool(audio_only_var.get())
+            state = 'disabled' if only_audio else 'readonly'
+            for widget in [q_cb, v_cb, a_cb, c_cb]:
+                widget.configure(state=state)
+            audio_format_cb.configure(state='readonly' if only_audio else 'disabled')
+            if only_audio:
+                refresh_audio_quality()
+            else:
+                audio_quality_cb.configure(state='disabled')
+
+        def on_write_subs_change(*_):
+            if not write_subs_var.get():
+                embed_subs_var.set(0)
+
+        audio_format_cb.bind('<<ComboboxSelected>>', on_audio_format_change)
+        audio_only_var.trace_add('write', apply_audio_only_state)
+        write_subs_var.trace_add('write', on_write_subs_change)
+
+        refresh_audio_quality()
+        apply_audio_only_state()
+        if not audio_only_var.get():
+            audio_format_cb.configure(state='disabled')
 
         def on_ok():
             height_map = {
@@ -1625,6 +2036,7 @@ class DownloaderApp(tk.Tk):
                 "1440p (2K)": 1440, "2160p (4K)": 2160, "4320p (8K)": 4320
             }
             h = height_map.get(q_var.get(), 1080)
+            subtitles_list = tuple(lang.strip() for lang in subtitle_var.get().split(',') if lang.strip())
             new_preset = DownloadPreset(
                 height=h,
                 vcodec_choice=v_var.get(),
@@ -1634,8 +2046,13 @@ class DownloaderApp(tk.Tk):
                 outdir=(outdir_var.get().strip() or item.preset.outdir),
                 outtmpl_user=(outtmpl_var.get().strip() or item.preset.outtmpl_user),
                 cookies=(cookies_var.get().strip() or None),
-                audio_only_mp3=bool(audio_only_var.get()),
-                mp3_kbps=int(mp3_bitrate_var.get() or '192'),
+                audio_only=bool(audio_only_var.get()),
+                audio_format=audio_format_var.get(),
+                audio_quality=audio_quality_var.get(),
+                download_playlist=bool(playlist_var.get()),
+                subtitle_langs=subtitles_list,
+                write_subtitles=bool(write_subs_var.get()),
+                embed_subtitles=bool(embed_subs_var.get()),
             )
             item.preset = new_preset
             self._update_queue_tv_row(item)
@@ -1643,7 +2060,7 @@ class DownloaderApp(tk.Tk):
             win.destroy()
 
         ttk.Button(btns, text="Отмена", command=win.destroy).pack(side="right")
-        ttk.Button(btns, text="Сохранить", command=on_ok).pack(side="right", padx=(0,10))
+        ttk.Button(btns, text="Сохранить", style="Accent.TButton", command=on_ok).pack(side="right", padx=(0, 10))
 
         for i in range(4):
             frm.grid_columnconfigure(i, weight=1)
@@ -1669,8 +2086,13 @@ class DownloaderApp(tk.Tk):
             outdir=outdir,
             outtmpl_user=self.outtmpl_var.get().strip() or "%(title)s.%(ext)s",
             cookies=(self.cookies_var.get().strip() or None),
-            audio_only_mp3=bool(self.audio_only_var.get()) if hasattr(self,'audio_only_var') else False,
-            mp3_kbps=int((self.mp3_bitrate_var.get() if hasattr(self,'mp3_bitrate_var') else '192') or 192)
+            audio_only=bool(self.audio_only_var.get()) if hasattr(self, 'audio_only_var') else False,
+            audio_format=self.audio_format_var.get() if hasattr(self, 'audio_format_var') else DEFAULT_AUDIO_FORMAT,
+            audio_quality=self.audio_quality_var.get() if hasattr(self, 'audio_quality_var') else DEFAULT_AUDIO_QUALITY,
+            download_playlist=bool(self.playlist_var.get()) if hasattr(self, 'playlist_var') else False,
+            subtitle_langs=tuple(self.selected_subtitle_langs),
+            write_subtitles=bool(self.write_subs_var.get()) if hasattr(self, 'write_subs_var') else False,
+            embed_subtitles=bool(self.embed_subs_var.get()) if hasattr(self, 'embed_subs_var') else False,
         )
         return preset
 
@@ -1678,18 +2100,29 @@ class DownloaderApp(tk.Tk):
 
     
     def _bind_setting_events(self):
-        # Comboboxes: include optional mp3 bitrate combobox safely
-        for cb in [self.quality_cb, self.vcodec_cb, self.acodec_cb, self.container_cb, self.alang_cb, getattr(self, 'mp3_bitrate_cb', None)]:
+        for cb in [
+            self.quality_cb,
+            self.vcodec_cb,
+            self.acodec_cb,
+            self.container_cb,
+            self.alang_cb,
+            getattr(self, 'audio_format_cb', None),
+            getattr(self, 'audio_quality_cb', None),
+        ]:
             if cb:
                 cb.bind("<<ComboboxSelected>>", lambda e: self._save_settings_debounced())
 
-        # Text variables
         for var in [self.outdir_var, self.outtmpl_var, self.cookies_var, self.url_var]:
             var.trace_add("write", lambda *args: self._save_settings_debounced())
 
-        # Checkbox: audio-only
-        if hasattr(self, 'audio_only_var'):
-            self.audio_only_var.trace_add("write", lambda *args: self._save_settings_debounced())
+        for ivar in [
+            getattr(self, 'audio_only_var', None),
+            getattr(self, 'playlist_var', None),
+            getattr(self, 'write_subs_var', None),
+            getattr(self, 'embed_subs_var', None),
+        ]:
+            if ivar is not None:
+                ivar.trace_add("write", lambda *args: self._save_settings_debounced())
 
     def _load_settings(self):
         if not os.path.isfile(CONFIG_PATH):
@@ -1705,15 +2138,38 @@ class DownloaderApp(tk.Tk):
         self.vcodec_var.set(cfg.get("vcodec", self.vcodec_var.get()))
         self.acodec_var.set(cfg.get("acodec", self.acodec_var.get()))
         self.container_var.set(cfg.get("container", self.container_var.get()))
-        self.alang_var.set(cfg.get("audio_lang", "ru"))
+        self.alang_var.set(cfg.get("audio_lang", "orig"))
+        if hasattr(self, 'playlist_var'):
+            self.playlist_var.set(1 if cfg.get('download_playlist', False) else 0)
+        legacy_audio_only = cfg.get('audio_only_mp3')
         if hasattr(self, 'audio_only_var'):
-            self.audio_only_var.set(1 if cfg.get('audio_only_mp3', False) else 0)
-        if hasattr(self, 'mp3_bitrate_var'):
-            self.mp3_bitrate_var.set(str(cfg.get('mp3_kbps', 192)))
+            self.audio_only_var.set(1 if cfg.get('audio_only', legacy_audio_only or False) else 0)
+        audio_format = cfg.get('audio_format', DEFAULT_AUDIO_FORMAT)
+        if audio_format not in AUDIO_FORMAT_OPTIONS:
+            audio_format = DEFAULT_AUDIO_FORMAT
+        if hasattr(self, 'audio_format_var'):
+            self.audio_format_var.set(audio_format)
+        if hasattr(self, 'audio_format_label_var'):
+            self.audio_format_label_var.set(AUDIO_FORMAT_OPTIONS[audio_format]['label'])
+        if hasattr(self, 'audio_quality_var'):
+            aq = str(cfg.get('audio_quality', cfg.get('mp3_kbps', DEFAULT_AUDIO_QUALITY)))
+            self.audio_quality_var.set(aq)
+        self.selected_subtitle_langs = list(cfg.get('subtitle_langs', [])) if isinstance(cfg.get('subtitle_langs', []), (list, tuple)) else []
+        if hasattr(self, 'write_subs_var'):
+            self.write_subs_var.set(1 if cfg.get('write_subtitles', False) else 0)
+        if hasattr(self, 'embed_subs_var'):
+            self.embed_subs_var.set(1 if cfg.get('embed_subtitles', False) else 0)
+            if hasattr(self, 'write_subs_var') and not self.write_subs_var.get():
+                self.embed_subs_var.set(0)
         self.outdir_var.set(cfg.get("outdir", self.outdir_var.get()))
         self.outtmpl_var.set(cfg.get("outtmpl", self.outtmpl_var.get()))
         self.cookies_var.set(cfg.get("cookies", self.cookies_var.get()))
         self.url_var.set(cfg.get("last_url", self.url_var.get()))
+
+        self._refresh_audio_quality_values()
+        self._on_audio_only_toggle(init=True)
+        self._update_subtitle_display()
+        self._on_subtitle_option_changed(init=True)
 
         self._append_log("Настройки загружены.")
 
@@ -1731,8 +2187,13 @@ class DownloaderApp(tk.Tk):
             "vcodec": self.vcodec_var.get(),
             "acodec": self.acodec_var.get(),
             "audio_lang": self.alang_var.get(),
-            "audio_only_mp3": bool(self.audio_only_var.get()) if hasattr(self,'audio_only_var') else False,
-            "mp3_kbps": int((self.mp3_bitrate_var.get() if hasattr(self,'mp3_bitrate_var') else '192') or 192),
+            "audio_only": bool(self.audio_only_var.get()) if hasattr(self,'audio_only_var') else False,
+            "audio_format": self.audio_format_var.get() if hasattr(self, 'audio_format_var') else DEFAULT_AUDIO_FORMAT,
+            "audio_quality": self.audio_quality_var.get() if hasattr(self, 'audio_quality_var') else DEFAULT_AUDIO_QUALITY,
+            "download_playlist": bool(self.playlist_var.get()) if hasattr(self, 'playlist_var') else False,
+            "subtitle_langs": list(self.selected_subtitle_langs),
+            "write_subtitles": bool(self.write_subs_var.get()) if hasattr(self, 'write_subs_var') else False,
+            "embed_subtitles": bool(self.embed_subs_var.get()) if hasattr(self, 'embed_subs_var') else False,
             "container": self.container_var.get(),
             "outdir": self.outdir_var.get(),
             "outtmpl": self.outtmpl_var.get(),
