@@ -281,6 +281,17 @@ class DownloaderApp(tk.Tk):
         url_entry.pack(side="left", fill="x", expand=True, padx=(0, pad))
         url_entry.focus_set()
 
+        self.analyze_btn = ttk.Button(
+            url_frame,
+            text="Анализировать",
+            style="Accent.TButton",
+            command=self._on_fetch_metadata_clicked,
+        )
+        self.analyze_btn.pack(side="left", padx=(0, pad))
+
+        self.analyze_status_var = tk.StringVar(value="")
+        self.analyze_status_label = ttk.Label(url_frame, textvariable=self.analyze_status_var, foreground=MUTED_TEXT_COLOR)
+        self.analyze_status_label.pack(side="left")
         analyze_btn = ttk.Button(url_frame, text="Анализировать", style="Accent.TButton", command=self._on_fetch_metadata_clicked)
         analyze_btn.pack(side="left", padx=(0, pad))
 
@@ -686,6 +697,33 @@ class DownloaderApp(tk.Tk):
         langs_preview = ", ".join(self.available_audio_languages[:6])
         subs_preview = ", ".join(self.available_subtitle_languages[:6]) or "—"
         self._append_log(f"Анализ завершён. Аудиодорожки: {langs_preview or '—'} | Субтитры: {subs_preview}")
+        self._set_analyze_state(
+            "done",
+            f"Найдено аудио: {len(self.available_audio_languages)} | субтитры: {len(self.available_subtitle_languages)}",
+        )
+
+    def _set_analyze_state(self, state: str, message: str = ""):
+        if not hasattr(self, "analyze_btn"):
+            return
+
+        def apply():
+            try:
+                if state == "running":
+                    self.analyze_btn.configure(state="disabled", text="Анализ…")
+                    self.analyze_status_var.set(message or "Получаем данные…")
+                elif state == "done":
+                    self.analyze_btn.configure(state="normal", text="Анализировать")
+                    self.analyze_status_var.set(message)
+                elif state == "error":
+                    self.analyze_btn.configure(state="normal", text="Анализировать")
+                    self.analyze_status_var.set(message or "Не удалось получить метаданные")
+                else:
+                    self.analyze_btn.configure(state="normal", text="Анализировать")
+                    self.analyze_status_var.set(message)
+            except Exception:
+                pass
+
+        self.after(0, apply)
 
     def _on_fetch_metadata_clicked(self):
         url = (self.url_var.get() or "").strip()
@@ -695,6 +733,7 @@ class DownloaderApp(tk.Tk):
         if self._metadata_fetching:
             return
         self._metadata_fetching = True
+        self._set_analyze_state("running")
         self._append_log("Анализируем ссылку через yt-dlp...")
         threading.Thread(target=self._fetch_metadata_worker, args=(url,), daemon=True).start()
 
@@ -715,6 +754,7 @@ class DownloaderApp(tk.Tk):
             self.after(0, lambda info=info: self._update_languages_from_info(info))
         except Exception as e:
             self._append_log(f"Не удалось получить метаданные: {e}")
+            self._set_analyze_state("error", "Ошибка при анализе")
             self.after(0, lambda: messagebox.showerror("Анализ", f"Не удалось получить метаданные: {e}"))
         finally:
             self.after(0, lambda: setattr(self, "_metadata_fetching", False))
