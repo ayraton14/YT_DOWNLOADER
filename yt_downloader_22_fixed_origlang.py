@@ -292,6 +292,8 @@ class DownloaderApp(tk.Tk):
         self.analyze_status_var = tk.StringVar(value="")
         self.analyze_status_label = ttk.Label(url_frame, textvariable=self.analyze_status_var, foreground=MUTED_TEXT_COLOR)
         self.analyze_status_label.pack(side="left")
+        analyze_btn = ttk.Button(url_frame, text="Анализировать", style="Accent.TButton", command=self._on_fetch_metadata_clicked)
+        analyze_btn.pack(side="left", padx=(0, pad))
 
         paste_btn = ttk.Button(url_frame, text="Вставить", command=self._paste_from_clipboard)
         paste_btn.pack(side="left", padx=(0, pad))
