@@ -290,10 +290,12 @@ class DownloaderApp(tk.Tk):
         self.analyze_btn.pack(side="left", padx=(0, pad))
 
         self.analyze_status_var = tk.StringVar(value="")
-        self.analyze_status_label = ttk.Label(url_frame, textvariable=self.analyze_status_var, foreground=MUTED_TEXT_COLOR)
+        self.analyze_status_label = ttk.Label(
+            url_frame,
+            textvariable=self.analyze_status_var,
+            foreground=MUTED_TEXT_COLOR,
+        )
         self.analyze_status_label.pack(side="left")
-        analyze_btn = ttk.Button(url_frame, text="Анализировать", style="Accent.TButton", command=self._on_fetch_metadata_clicked)
-        analyze_btn.pack(side="left", padx=(0, pad))
 
         paste_btn = ttk.Button(url_frame, text="Вставить", command=self._paste_from_clipboard)
         paste_btn.pack(side="left", padx=(0, pad))
@@ -348,7 +350,7 @@ class DownloaderApp(tk.Tk):
         ttk.Label(settings, text="Папка сохранения:").grid(row=1, column=2, padx=(0, 5), pady=5, sticky="w")
         self.outdir_var = tk.StringVar(value=os.path.join(os.path.expanduser("~"), "Downloads"))
         outdir_entry = ttk.Entry(settings, textvariable=self.outdir_var, width=40)
-        outdir_entry.grid(row=1, column=3, padx=(0, 5), pady=5, sticky="w")
+        outdir_entry.grid(row=1, column=3, padx=(0, 5), pady=5, sticky="ew")
         outdir_btn = ttk.Button(settings, text="Выбрать...", command=self._choose_outdir)
         outdir_btn.grid(row=1, column=4, padx=(0, 15), pady=5, sticky="w")
 
@@ -361,13 +363,13 @@ class DownloaderApp(tk.Tk):
         # Путь к cookies
         ttk.Label(settings, text="Путь cookies:").grid(row=2, column=0, padx=(0, 5), pady=5, sticky="w")
         self.cookies_path_entry = ttk.Entry(settings, textvariable=self.cookies_var, width=85)
-        self.cookies_path_entry.grid(row=2, column=1, columnspan=7, padx=(0, 5), pady=5, sticky="w")
+        self.cookies_path_entry.grid(row=2, column=1, columnspan=7, padx=(0, 5), pady=5, sticky="ew")
 
         # Имя файла (шаблон)
         ttk.Label(settings, text="Имя файла:").grid(row=3, column=0, padx=(0, 5), pady=5, sticky="w")
         self.outtmpl_var = tk.StringVar(value="%(title)s.%(ext)s")
         outtmpl_entry = ttk.Entry(settings, textvariable=self.outtmpl_var, width=85)
-        outtmpl_entry.grid(row=3, column=1, columnspan=7, padx=(0, 5), pady=5, sticky="w")
+        outtmpl_entry.grid(row=3, column=1, columnspan=7, padx=(0, 5), pady=5, sticky="ew")
         hint = ttk.Label(settings, text="Рекомендуем оставить %(title)s.%(ext)s — приложение переименует итоговый файл автоматически.", foreground=MUTED_TEXT_COLOR)
         hint.grid(row=4, column=1, columnspan=7, padx=(0, 5), pady=(0, 5), sticky="w")
 
@@ -405,12 +407,14 @@ class DownloaderApp(tk.Tk):
 
         self.subtitle_display_var = tk.StringVar(value="Не выбрано")
         subtitle_entry = ttk.Entry(settings, textvariable=self.subtitle_display_var, state="readonly", width=40)
-        subtitle_entry.grid(row=6, column=4, columnspan=3, sticky="w", padx=(0, 5), pady=(5, 0))
+        subtitle_entry.grid(row=6, column=4, columnspan=3, sticky="ew", padx=(0, 5), pady=(5, 0))
         self.subtitle_select_btn = ttk.Button(settings, text="Выбрать языки...", command=self._open_subtitle_selector)
         self.subtitle_select_btn.grid(row=6, column=7, columnspan=2, sticky="w", pady=(5, 0))
 
         for col in range(0, 9):
-            settings.grid_columnconfigure(col, weight=1 if col in (1, 3, 5, 7) else 0)
+            weight = 1 if col in (1, 3, 6, 7, 8) else 0
+            settings.grid_columnconfigure(col, weight=weight)
+        settings.grid_columnconfigure(3, weight=2)
 
         # Кнопки управления
         buttons = ttk.Frame(main, padding=(0, 0, 0, 0))
@@ -433,9 +437,12 @@ class DownloaderApp(tk.Tk):
         status_label = ttk.Label(progress_frame, textvariable=self.status_var)
         status_label.pack(fill="x", pady=(0, 0))
 
+        # Центральная область с очередью и логами
+        center_split = ttk.Panedwindow(main, orient="vertical")
+        center_split.pack(fill="both", expand=True, pady=(0, pad))
+
         # Очередь
-        queue_frame = ttk.LabelFrame(main, text="Очередь загрузок", padding=pad)
-        queue_frame.pack(fill="both", expand=True, pady=(0, pad))
+        queue_frame = ttk.LabelFrame(center_split, text="Очередь загрузок", padding=pad)
 
         queue_buttons = ttk.Frame(queue_frame)
         queue_buttons.pack(fill="x", expand=False, pady=(0, pad))
@@ -463,6 +470,8 @@ class DownloaderApp(tk.Tk):
             self.queue_tv.column(col, width=w, anchor="w")
         self.queue_tv.pack(fill="both", expand=True)
 
+        center_split.add(queue_frame, weight=3)
+
         # Контекстное меню / события таблицы
         self._queue_menu = tk.Menu(self, tearoff=0)
         self._queue_menu.add_command(label="Изменить…", command=self._on_queue_edit_selected)
@@ -475,8 +484,7 @@ class DownloaderApp(tk.Tk):
         self.queue_tv.configure(selectmode="extended")
 
         # --- ДВА ЛОГА: слева важный, справа подробный ---
-        logs_group = ttk.LabelFrame(main, text="Журналы", padding=pad)
-        logs_group.pack(fill="both", expand=True)
+        logs_group = ttk.LabelFrame(center_split, text="Журналы", padding=pad)
 
         # горизонтальное расположение панелей (левая/правая)
         paned = ttk.Panedwindow(logs_group, orient="horizontal")
@@ -499,6 +507,8 @@ class DownloaderApp(tk.Tk):
         self.log_raw_text.pack(side="left", fill="both", expand=True)
         raw_vsb.pack(side="right", fill="y")
         paned.add(raw_frame, weight=1)
+
+        center_split.add(logs_group, weight=2)
 
         # Стили
         try:
