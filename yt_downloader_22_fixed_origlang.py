@@ -683,13 +683,30 @@ class DownloaderApp(tk.Tk):
 
         for entry in entries:
             for fmt in entry.get("formats", []) or []:
-                lang = fmt.get("language") or fmt.get("language_preference") or fmt.get("language_code")
-                if lang:
-                    audio_langs.add(lang.lower())
+                raw_lang = (
+                    fmt.get("language")
+                    or fmt.get("language_preference")
+                    or fmt.get("language_code")
+                )
+                if not raw_lang:
+                    continue
+                if isinstance(raw_lang, (list, tuple, set)):
+                    candidates = raw_lang
+                else:
+                    candidates = (raw_lang,)
+                for candidate in candidates:
+                    if candidate is None:
+                        continue
+                    normalized = str(candidate).strip()
+                    if normalized:
+                        audio_langs.add(normalized.lower())
             subtitles = entry.get("subtitles") or {}
             for lang_code in subtitles.keys():
-                if lang_code:
-                    subtitle_langs.add(lang_code)
+                if lang_code is None:
+                    continue
+                normalized_code = str(lang_code).strip()
+                if normalized_code:
+                    subtitle_langs.add(normalized_code)
 
         if audio_langs:
             others = sorted({l for l in audio_langs if l.lower() not in ("", "und", "none", "orig")})
