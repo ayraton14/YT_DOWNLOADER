@@ -683,23 +683,33 @@ class DownloaderApp(tk.Tk):
 
         for entry in entries:
             for fmt in entry.get("formats", []) or []:
-                raw_lang = (
-                    fmt.get("language")
-                    or fmt.get("language_preference")
-                    or fmt.get("language_code")
-                )
-                if not raw_lang:
-                    continue
-                if isinstance(raw_lang, (list, tuple, set)):
-                    candidates = raw_lang
-                else:
-                    candidates = (raw_lang,)
-                for candidate in candidates:
+                raw_values = []
+                for key in ("language", "language_code", "language_original", "audio_lang"):
+                    value = fmt.get(key)
+                    if not value:
+                        continue
+                    if isinstance(value, (list, tuple, set)):
+                        raw_values.extend(value)
+                    else:
+                        raw_values.append(value)
+
+                pref_value = fmt.get("language_preference")
+                if isinstance(pref_value, str):
+                    raw_values.append(pref_value)
+
+                for candidate in raw_values:
                     if candidate is None:
                         continue
+                    if isinstance(candidate, (int, float)):
+                        continue
                     normalized = str(candidate).strip()
-                    if normalized:
-                        audio_langs.add(normalized.lower())
+                    if not normalized:
+                        continue
+                    normalized = normalized.replace("_", "-").lower()
+                    if "-" in normalized:
+                        normalized = normalized.split("-", 1)[0]
+                    if normalized and normalized not in {"und", "none"}:
+                        audio_langs.add(normalized)
             subtitles = entry.get("subtitles") or {}
             for lang_code in subtitles.keys():
                 if lang_code is None:
